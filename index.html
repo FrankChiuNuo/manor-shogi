@@ -51,85 +51,61 @@ function draw(){const goals=pick===null?[]:options(game,pick);el('board').replac
  el('history').replaceChildren(...game.log.map(t=>{let li=document.createElement('li');li.textContent=t;return li}));
  el('mode').textContent=seat===null?'同機雙人':seat==='watch'?'即時觀戰':'連線 · 你是'+teams[seat];el('reset').hidden=seat!==null;el('leave').hidden=seat===null;for(const id of ['join','host','watch','code'])el(id).disabled=seat!==null}
 el('reset').onclick=()=>{if(!game.log.length||confirm('重新開始這局棋？')){game=initial();pick=null;draw()}};
-let localGame,loader;
-function library(){if(window.Peer)return Promise.resolve();if(!loader)loader=new Promise((ok,no)=>{let tag=document.createElement('script');tag.src='https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js';tag.onload=ok;tag.onerror=()=>{loader=null;tag.remove();no()};document.head.append(tag)});return loader}
-let room='',opened=false,pending=false,opponentLeft=false;
-const watchers=new Set();
-function roomText(){
- if(!opened)return '正在連線…';
- const activity=opponentLeft?'對手已離線':ready?'對局已連線':'等待對手';
- return '房間碼 '+room+' · '+activity+' · '+watchers.size+' 人觀戰';
+const FIREBASE_CONFIG={"apiKey":"AIzaSyDZq3ynloiJmw577cckFt3kgoE9tz8WUfk","authDomain":"manor-shogi.firebaseapp.com","projectId":"manor-shogi","appId":"1:649902738551:web:142f853511a52337c68a72","databaseURL":"https://manor-shogi-default-rtdb.asia-southeast1.firebasedatabase.app"};
+let pending=false, localGame, db, account, roomRef, presence, sessionId=0;
+async function connect(){
+ const base='https://www.gstatic.com/firebasejs/12.6.0/';
+ const [app,auth,data]=await Promise.all(['firebase-app.js','firebase-auth.js','firebase-database.js'].map(n=>import(base+n)));
+ const instance=app.getApps()[0]||app.initializeApp(FIREBASE_CONFIG);
+ const a=auth.getAuth(instance);await a.authStateReady();await auth.setPersistence(a,auth.browserSessionPersistence);
+ account=(a.currentUser|| (await auth.signInAnonymously(a)).user).uid;
+ db=data.getDatabase(instance);return data;
 }
-function transmit(c,data){try{if(c?.open)c.send(data)}catch{/* Connection lifecycle handles departures. */}}
-function broadcast(){
- if(seat!==0)return;
- const note=roomText(), data={type:'state',game,note,playing:ready};
- el('net').textContent=note;transmit(channel,data);
- for(const c of watchers)transmit(c,data);
-}
-function submit(from,to){
- if(seat===1){pending=true;transmit(channel,{type:'move',from,to,step:game.log.length});return}
- if(move(game,from,to))broadcast();
-}
+let api,unsubscribe,stopPresence;
 function leave(msg){
- session++;const old=peer;peer=null;channel=null;watchers.clear();ready=false;
- opened=false;pending=false;opponentLeft=false;seat=null;
- old?.destroy();game=localGame||initial();pick=null;el('net').textContent=msg;draw()
+ sessionId++;unsubscribe?.();unsubscribe=null;stopPresence?.();stopPresence=null;
+ if(presence)api.remove(presence).catch(()=>{});presence=null;roomRef=null;
+ seat=null;ready=false;pending=false;game=localGame||initial();pick=null;el('net').textContent=msg;draw();
 }
-el('leave').onclick=()=>{if(seat==='watch'||!ready||game.end||confirm('離開本局連線？'))leave('已返回同機對局。')};
+async function submit(from,to){
+ if(seat===null){move(game,from,to);return}
+ if(!playable())return;
+ const id=sessionId,step=game.log.length;pending=true;
+ try{await api.set(api.child(roomRef,'moves/'+step),{from,to,step})}
+ catch{if(id===sessionId)el('net').textContent='送出失敗，請確認網路及回合。'}
+ finally{if(id===sessionId){pending=false;draw()}}
+}
 async function start(role){
  let code=el('code').value.trim().toUpperCase();
- if(role!==0&&!/^[A-Z0-9]{6}$/.test(code)){el('net').textContent='請輸入六位英數房間碼。';return}
+ if(role!==0&&!/^[A-Z0-9]{6}$/.test(code)){el('net').textContent='請輸入六位房間碼。';return}
  if(role===0)code=Array.from(crypto.getRandomValues(new Uint8Array(6)),n=>'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[n%32]).join('');
- const id=++session;room=code;localGame=game;seat=role;game=initial();pick=null;draw();el('net').textContent='正在連線…';
- const fail=()=>{if(id===session)leave('連線已結束或房間無法使用。請確認房間碼，再重新加入。')};
- function incoming(c){
-  if(role!==0||id!==session){c.close();return}
-  const spectating=c.metadata?.role==='watch';
-  if(!spectating&&(channel||opponentLeft||c.metadata?.role!=='play')){
-   c.on('open',()=>transmit(c,{type:'full'}));return;
-  }
-  if(!spectating)channel=c;
-  c.on('open',()=>{
-   if(id!==session)return;
-   if(spectating)watchers.add(c);else ready=true;
-   broadcast();draw();
-  });
-  c.on('data',m=>{
-   if(id!==session||c!==channel||!ready||game.turn!==1||m?.type!=='move')return;
-   const f=m.from;
-   if(m.step===game.log.length&&(Number.isInteger(f)&&f>=0&&f<12||['g','e','c'].includes(f)))move(game,f,m.to);
-   broadcast();draw();
-  });
-  function departed(){
-   if(id!==session)return;
-   if(!watchers.delete(c)){
-    if(c!==channel)return;
-    channel=null;opponentLeft=ready;ready=false;
-   }
-   broadcast();draw();
-  }
-  c.on('close',departed);c.on('error',departed);
- }
+ const id=++sessionId;localGame=game;seat=role;game=initial();pick=null;ready=false;draw();
+ el('net').textContent='正在連線…';
  try{
-  await library();if(id!==session)return;
-  const prefix='manor-shogi-tw-v1-';
-  peer=role===0?new Peer(prefix+code):new Peer();
-  peer.on('error',e=>{if(role===0&&opened&&e.type==='webrtc')return;fail()});
-  peer.on('connection',incoming);
-  peer.on('open',()=>{
-   if(id!==session)return;opened=true;
-   if(role===0){broadcast();return}
-   channel=peer.connect(prefix+code,{reliable:true,metadata:{role:role==='watch'?'watch':'play'}});
-   channel.on('data',m=>{
-    if(id!==session)return;
-    if(m?.type==='full'){leave('對局席位已滿，請按「觀戰」加入。');return}
-    if(m?.type!=='state')return;
-    game=m.game;ready=m.playing;pending=false;pick=null;el('net').textContent=m.note;draw();
-   });
-   channel.on('close',fail);channel.on('error',fail);
-  })
- }catch{fail()}
+ api=await connect();if(id!==sessionId)return;
+ const room=api.ref(db,'rooms/'+code);roomRef=room;
+ if(role===0)await api.set(api.child(room,'host'),account);
+ else{
+ const snapshot=await api.get(room);if(!snapshot.child('host').exists())throw Error('找不到這個房間。');
+ if(role===1){if(snapshot.child('host').val()===account)throw Error('請用另一部裝置或無痕視窗加入對局。');
+ if(snapshot.child('guest').exists()&&snapshot.child('guest').val()!==account)throw Error('席位已滿，可以選擇觀戰。');
+ if(!snapshot.child('guest').exists())await api.set(api.child(room,'guest'),account)}
+ }
+ if(id!==sessionId)return;
+ const member=api.push(api.child(room,'presence/'+account));presence=member;
+ stopPresence=api.onValue(api.ref(db,'.info/connected'),async snap=>{if(!snap.val()||id!==sessionId)return;try{await api.onDisconnect(member).remove();if(id===sessionId)await api.set(member,String(role))}catch{}});
+ unsubscribe=api.onValue(room,snap=>{
+ if(id!==sessionId)return;
+ const r=snap.val();if(!r){leave('房間已關閉。');return}
+ const replay=initial();for(const m of Object.values(r.moves||{})){if(!move(replay,m.from,m.to)){leave('棋譜無法重建，請另開新局。');return}}
+ if(replay.log.length!==game.log.length)pick=null;
+ game=replay;const members=Object.values(r.presence||{}).flatMap(x=>Object.values(x));
+ ready=!!r.guest&&members.includes('0')&&members.includes('1');
+ el('net').textContent='房間碼 '+code+' · '+(ready?'對局已連線':r.guest?'等待玩家連線':'等待對手')+' · '+members.filter(x=>x==='watch').length+' 人觀戰';draw()
+ },()=>{if(id===sessionId)leave('房間讀取失敗。')});
+ }catch(e){if(id===sessionId)leave(e.code?'連線失敗：'+e.code:e.message)}
 }
+el('leave').onclick=()=>{if(seat==='watch'||!ready||game.end||confirm('離開本局連線？'))leave('已返回同機對局。')};
+
 el('host').onclick=()=>start(0);el('join').onclick=()=>start(1);el('watch').onclick=()=>start('watch');draw();
 </script></html>
