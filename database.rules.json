@@ -92,7 +92,7 @@
                   ".validate": false
                 },
                 "card": {
-                  ".validate": "newData.isBoolean() && (!newData.val() || root.child('rooms2').child($code).child('variant').val() === 'cards')"
+                  ".validate": "newData.isBoolean() && (newData.val() === false || root.child('rooms2').child($code).child('variant').val() === 'cards')"
                 }
               }
             }
