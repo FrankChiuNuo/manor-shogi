@@ -1,0 +1,44 @@
+name: Verify published game
+on:
+  push:
+    branches: [verify/live-game-89829af]
+permissions: {}
+jobs:
+  game:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Install browser test tools
+        run: |
+          npm install --no-save playwright@1.55.0
+          npx playwright install chromium --with-deps
+      - name: Play a live game and verify spectators
+        run: |
+          node <<'JS'
+          const {chromium}=require('playwright');
+          const assert=require('node:assert/strict');
+          (async()=>{
+           const browser=await chromium.launch();
+           try {
+           const url='https://frankchiunuo.github.io/manor-shogi/?release=89829af';
+           const page=async width=>{const ctx=await browser.newContext({viewport:{width,height:840}});return ctx.newPage()};
+           const host=await page(393),guest=await page(1280),watch=await page(390);
+           await host.goto(url);await host.locator('#nick').fill('測試房主');await host.locator('#variant').selectOption('cards');await host.locator('#guide').uncheck();
+           await host.locator('#host').click();await host.waitForFunction(()=>/房間碼 [A-Z0-9]{6}/.test(document.querySelector('#net').textContent),null,{timeout:30000});
+           const code=(await host.locator('#net').innerText()).match(/房間碼 ([A-Z0-9]{6})/)[1];
+           for(const [p,nick,role] of [[guest,'測試對手','join'],[watch,'測試觀眾','watch']]){
+           await p.goto(url+'&room='+code+(role==='watch'?'&watch=1':''));assert.equal(await p.locator('#code').inputValue(),code);
+           await p.locator('#nick').fill(nick);await p.locator('#'+role).click(); }
+           await host.waitForFunction(()=>document.querySelector('#net').textContent.includes('1 人觀戰'));
+           await host.locator('#card').click();await host.locator('#board button').nth(7).click();await host.locator('#board button').nth(6).click();
+           await guest.waitForFunction(()=>document.querySelector('#history').children.length===1);
+           await guest.locator('#board button').nth(4).click();await guest.locator('#board button').nth(7).click();
+           await watch.waitForFunction(()=>document.querySelector('#history').children.length===2);
+           assert(await watch.locator('#reset').isHidden());await guest.locator('#reset').click();
+           await host.waitForFunction(()=>document.querySelector('#history').children.length===0);
+           await watch.waitForFunction(()=>document.querySelector('#history').children.length===0);
+           for(const p of [host,guest,watch])assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+           console.log('PASS: production HTML, 3 authenticated sessions, invites, card, guest move, spectator sync, same-room reset and viewport widths');
+           }finally{await browser.close()}
+          })().catch(e=>{console.error(e);process.exitCode=1})
+          JS
