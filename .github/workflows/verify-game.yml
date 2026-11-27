@@ -5,20 +5,20 @@ on:
 permissions: {}
 jobs:
   game:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 6
     steps:
       - name: Install browser test tools
         run: |
           npm install --no-save playwright@1.55.0
-          npx playwright install chromium --with-deps
+          google-chrome --version
       - name: Play a live game and verify spectators
         run: |
           node <<'JS'
           const {chromium}=require('playwright');
           const assert=require('node:assert/strict');
           (async()=>{
-           const browser=await chromium.launch();
+           const browser=await chromium.launch({channel:'chrome'});
            try {
            const url='https://frankchiunuo.github.io/manor-shogi/?release=89829af';
            const page=async width=>{const ctx=await browser.newContext({viewport:{width,height:840}});return ctx.newPage()};
